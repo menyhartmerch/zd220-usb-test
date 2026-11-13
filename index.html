@@ -35,6 +35,9 @@
     <button data-poslat="test" disabled>Vytlačiť test</button>
     <button data-poslat="konfiguracia" disabled>Konfiguračný štítok</button>
     <button data-poslat="stav" disabled>Zistiť stav</button>
+    <button data-poslat="kalibracia" disabled>Kalibrácia štítku</button>
+    <button data-poslat="pauza" disabled>Zrušiť pauzu</button>
+    <button data-poslat="zrusit" disabled>Zrušiť všetku tlač</button>
 </div>
 
 <div class="card">
@@ -72,6 +75,9 @@
             + '^FO40,130^A0N,36,36^FD' + new Date().toLocaleString('sk-SK') + '^FS'
             + '^FO40,200^BCN,100,Y,N,N^FD123456789012^FS^XZ\r\n',
         konfiguracia: () => '~WC\r\n',
+        kalibracia: () => '~JC\r\n',
+        pauza: () => '~PS\r\n',
+        zrusit: () => '~JA\r\n',
         stav: () => getvar('device.product_name') + getvar('device.protected_mode') + getvar('device.protected_mode_allowed'),
         vypnut: () => '{}' + JSON.stringify({ protect: {
             authentication: { username: 'admin', password: document.querySelector('#heslo').value, type: 'basic' },
