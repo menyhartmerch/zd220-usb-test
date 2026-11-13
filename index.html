@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZD220 cez USB – test</title>
+<style>
+    :root { --dark: #1d2939; --ok: #1caf9a; --akcia: #428bca; --chyba: #d9534f; --line: #d3d7db; --bg: #e4e7ea; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; background: var(--bg); color: var(--dark); font: 18px Lato, "Helvetica Neue", Arial, sans-serif; }
+    h1 { font-size: 26px; margin: 0 0 12px; }
+    .card { background: #fff; border-radius: 6px; padding: 16px; margin-bottom: 14px; }
+    .stav { font-size: 22px; font-weight: 700; }
+    .stav.ok { color: var(--ok); }
+    .stav.zle { color: var(--chyba); }
+    button { height: 64px; padding: 0 22px; margin: 6px 6px 6px 0; border-radius: 4px; border: 1px solid #b8bec5; background: #fff; font-size: 20px; font-weight: 700; }
+    button.hlavne { background: var(--akcia); border-color: var(--akcia); color: #fff; }
+    button:disabled { opacity: .4; }
+    input, textarea { width: 100%; font-size: 20px; padding: 12px; border: 1px solid var(--line); border-radius: 4px; }
+    textarea { height: 90px; font-family: monospace; font-size: 16px; }
+    label { display: block; font-size: 15px; color: #636e7b; margin: 8px 0 4px; }
+    #log { white-space: pre-wrap; word-break: break-all; font: 14px monospace; max-height: 320px; overflow: auto; background: #f6f7f8; padding: 10px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>ZD220 cez USB – test</h1>
+
+<div class="card">
+    <div id="stav" class="stav zle">Tlačiareň nie je pripojená</div>
+    <button id="pripojit" class="hlavne">Pripojiť tlačiareň</button>
+    <div style="font-size: 15px; color: #636e7b">Aplikáciu Zebry najprv zavri – kým beží, drží si USB. Android sa spýta na povolenie: Povoliť.</div>
+</div>
+
+<div class="card">
+    <button data-poslat="test" disabled>Vytlačiť test</button>
+    <button data-poslat="konfiguracia" disabled>Konfiguračný štítok</button>
+    <button data-poslat="stav" disabled>Zistiť stav</button>
+</div>
+
+<div class="card">
+    <b>Vypnúť chránený režim</b>
+    <label for="heslo">Heslo správcu (skús 1234, potom prázdne)</label>
+    <input id="heslo" value="1234" autocomplete="off">
+    <button data-poslat="vypnut" disabled>Vypnúť chránený režim</button>
+</div>
+
+<div class="card">
+    <b>Vlastný príkaz</b>
+    <textarea id="prikaz" placeholder='! U1 getvar "device.protected_mode"'></textarea>
+    <button data-poslat="vlastny" disabled>Poslať</button>
+</div>
+
+<div class="card">
+    <b>Odpovede tlačiarne</b>
+    <div id="log"></div>
+</div>
+
+<script>
+(function () {
+    const ZEBRA = 0x0a5f;
+    const stav = document.querySelector('#stav');
+    const log = document.querySelector('#log');
+    let usb = null;
+    let von = null;
+    let dnu = null;
+
+    const zapis = (text) => { log.textContent += text + '\n'; log.scrollTop = log.scrollHeight; };
+    const getvar = (name) => '! U1 getvar "' + name + '"\r\n';
+
+    const prikazy = {
+        test: () => '^XA^CI28^FO40,40^A0N,60,60^FDRUKAHORE – test USB^FS'
+            + '^FO40,130^A0N,36,36^FD' + new Date().toLocaleString('sk-SK') + '^FS'
+            + '^FO40,200^BCN,100,Y,N,N^FD123456789012^FS^XZ\r\n',
+        konfiguracia: () => '~WC\r\n',
+        stav: () => getvar('device.product_name') + getvar('device.protected_mode') + getvar('device.protected_mode_allowed'),
+        vypnut: () => '{}' + JSON.stringify({ protect: {
+            authentication: { username: 'admin', password: document.querySelector('#heslo').value, type: 'basic' },
+            operation: 'configure-one',
+            'configure-one': { 'protected-mode-allowed': 'no' },
+        } }) + '\r\n' + getvar('device.protected_mode'),
+        vlastny: () => document.querySelector('#prikaz').value + '\r\n',
+    };
+
+    async function otvorit(device) {
+        await device.open();
+        if (device.configuration === null) await device.selectConfiguration(1);
+        for (const rozhranie of device.configuration.interfaces) {
+            const alt = rozhranie.alternates[0];
+            const out = alt.endpoints.find((e) => e.type === 'bulk' && e.direction === 'out');
+            if (!out) continue;
+            await device.claimInterface(rozhranie.interfaceNumber);
+            von = out.endpointNumber;
+            dnu = alt.endpoints.find((e) => e.type === 'bulk' && e.direction === 'in')?.endpointNumber ?? null;
+            break;
+        }
+        if (von === null) throw new Error('Tlačiareň nemá výstup na tlač (bulk OUT).');
+        usb = device;
+        stav.textContent = '● Pripojená: ' + (device.productName || 'Zebra') + ' ' + (device.serialNumber || '');
+        stav.className = 'stav ok';
+        document.querySelectorAll('[data-poslat]').forEach((b) => { b.disabled = false; });
+        citaj();
+    }
+
+    // Jedno stále čítanie – všetko, čo tlačiareň odpovie, ide do logu.
+    async function citaj() {
+        if (dnu === null) return;
+        const dekoder = new TextDecoder();
+        while (usb) {
+            try {
+                const vysledok = await usb.transferIn(dnu, 4096);
+                if (vysledok.data && vysledok.data.byteLength) zapis('← ' + dekoder.decode(vysledok.data));
+            } catch (e) {
+                break;
+            }
+        }
+    }
+
+    function odpojena(dovod) {
+        usb = null;
+        von = null;
+        dnu = null;
+        stav.textContent = 'Tlačiareň nie je pripojená' + (dovod ? ' – ' + dovod : '');
+        stav.className = 'stav zle';
+        document.querySelectorAll('[data-poslat]').forEach((b) => { b.disabled = true; });
+    }
+
+    async function pripojit(device) {
+        try {
+            await otvorit(device);
+        } catch (e) {
+            odpojena(e.message);
+            zapis('✗ ' + e.message);
+        }
+    }
+
+    if (!navigator.usb) {
+        stav.textContent = 'Tento prehliadač nevie USB (treba Chrome a https).';
+        document.querySelector('#pripojit').disabled = true;
+        return;
+    }
+
+    document.querySelector('#pripojit').addEventListener('click', async () => {
+        try {
+            await pripojit(await navigator.usb.requestDevice({ filters: [{ vendorId: ZEBRA }] }));
+        } catch (e) {
+            zapis('✗ ' + e.message);
+        }
+    });
+
+    document.querySelectorAll('[data-poslat]').forEach((tlacidlo) => tlacidlo.addEventListener('click', async () => {
+        const text = prikazy[tlacidlo.dataset.poslat]();
+        zapis('→ ' + (text.length > 200 ? text.slice(0, 200) + '…' : text.trim()));
+        try {
+            await usb.transferOut(von, new TextEncoder().encode(text));
+        } catch (e) {
+            zapis('✗ ' + e.message);
+            odpojena(e.message);
+        }
+    }));
+
+    // Raz povolená tlačiareň sa pripojí sama – po načítaní aj po znovu zapojení kábla.
+    navigator.usb.getDevices().then((devices) => { const z = devices.find((d) => d.vendorId === ZEBRA); if (z) pripojit(z); });
+    navigator.usb.addEventListener('connect', (e) => { if (e.device.vendorId === ZEBRA && !usb) pripojit(e.device); });
+    navigator.usb.addEventListener('disconnect', (e) => { if (e.device === usb) odpojena('kábel odpojený'); });
+})();
+</script>
+</body>
+</html>
