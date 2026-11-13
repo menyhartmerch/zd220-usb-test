@@ -38,6 +38,8 @@
     <button data-poslat="kalibracia" disabled>Kalibrácia štítku</button>
     <button data-poslat="pauza" disabled>Zrušiť pauzu</button>
     <button data-poslat="zrusit" disabled>Zrušiť všetku tlač</button>
+    <button data-poslat="velky" disabled>Veľký štítok (obrázok)</button>
+    <button data-poslat="hs" disabled>Stav ~HS</button>
 </div>
 
 <div class="card">
@@ -78,6 +80,18 @@
         kalibracia: () => '~JC\r\n',
         pauza: () => '~PS\r\n',
         zrusit: () => '~JA\r\n',
+        // Celý štítok 100 × 150 mm ako obrázok (^GFA) – rovnaký druh dát, aký posiela tlačový server pri štítku dopravcu, len bez adresy.
+        velky: () => {
+            const riadok = 100;
+            const vyska = 1199;
+            let hex = '';
+            for (let y = 0; y < vyska; y++) {
+                const pruh = Math.floor(y / 40) % 2 === 0 ? 'F0' : '0F';
+                hex += (y % 200 < 20 ? 'FF' : pruh).repeat(riadok);
+            }
+            return '^XA^PW799^LL1199^LH0,0^FO0,0^GFA,' + riadok * vyska + ',' + riadok * vyska + ',' + riadok + ',' + hex + '^FS^XZ\r\n';
+        },
+        hs: () => '~HS',
         stav: () => getvar('device.product_name') + getvar('device.protected_mode') + getvar('device.protected_mode_allowed'),
         vypnut: () => '{}' + JSON.stringify({ protect: {
             authentication: { username: 'admin', password: document.querySelector('#heslo').value, type: 'basic' },
@@ -114,7 +128,7 @@
         while (usb) {
             try {
                 const vysledok = await usb.transferIn(dnu, 4096);
-                if (vysledok.data && vysledok.data.byteLength) zapis('← ' + dekoder.decode(vysledok.data));
+                if (vysledok.data && vysledok.data.byteLength) zapis('← ' + dekoder.decode(vysledok.data).replace(/\x02/g, '[STX]').replace(/\x03/g, '[ETX]'));
             } catch (e) {
                 break;
             }
@@ -157,7 +171,9 @@
         const text = prikazy[tlacidlo.dataset.poslat]();
         zapis('→ ' + (text.length > 200 ? text.slice(0, 200) + '…' : text.trim()));
         try {
-            await usb.transferOut(von, new TextEncoder().encode(text));
+            const data = new TextEncoder().encode(text);
+            for (let i = 0; i < data.length; i += 16384) await usb.transferOut(von, data.subarray(i, i + 16384));
+            zapis('✓ odoslané ' + data.length + ' B');
         } catch (e) {
             zapis('✗ ' + e.message);
             odpojena(e.message);
